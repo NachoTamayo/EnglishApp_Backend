@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid())
+  googleId  String?  @unique
+  email     String   @unique
+  name      String
+  avatar    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model EnglishWords {
+  id    Int    @id @default(autoincrement())
+  word  String @unique
+  sound Bytes
+
+  words Words[]
+}
+
+model Words {
+  id           Int      @id @default(autoincrement())
+  original     Int
+  translation  String
+  creationDate DateTime @default(now())
+  type         Int
+
+  word     EnglishWords @relation(fields: [original], references: [id])
+  wordType WordType     @relation(fields: [type], references: [id])
+
+  userWords UserWords[]
+
+  @@unique([original, translation], name: "unique_original_translation")
+}
+
+model WordType {
+  id   Int    @id @default(autoincrement())
+  type String
+
+  words Words[]
+}
+
+model UserWords {
+  id     Int    @id @default(autoincrement())
+  userId String
+  wordId Int
+
+  Word Words @relation(fields: [wordId], references: [id])
+
+  @@unique([userId, wordId], name: "unique_user_word")
+}

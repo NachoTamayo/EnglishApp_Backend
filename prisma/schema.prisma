@@ -1,15 +1,14 @@
-// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider = "mongodb"
+  url      = env("MONGODB_URL")
 }
 
 model User {
-  id        String   @id @default(uuid())
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
   googleId  String?  @unique
   email     String   @unique
   name      String
@@ -19,41 +18,28 @@ model User {
 }
 
 model EnglishWords {
-  id    Int    @id @default(autoincrement())
+  id    String @id @default(auto()) @map("_id") @db.ObjectId
   word  String @unique
-  sound Bytes
-
-  words Words[]
+  sound String
 }
 
 model Words {
-  id           Int      @id @default(autoincrement())
-  original     Int
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  original     String   @unique
   translation  String
   creationDate DateTime @default(now())
-  type         Int
-
-  word     EnglishWords @relation(fields: [original], references: [id])
-  wordType WordType     @relation(fields: [type], references: [id])
-
-  userWords UserWords[]
-
-  @@unique([original, translation], name: "unique_original_translation")
+  type         String
 }
 
 model WordType {
-  id   Int    @id @default(autoincrement())
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
   type String
-
-  words Words[]
 }
 
 model UserWords {
-  id     Int    @id @default(autoincrement())
-  userId String
-  wordId Int
+  id   String @id @default(auto()) @map("_id") @db.ObjectId
+  user String
+  word String
 
-  Word Words @relation(fields: [wordId], references: [id])
-
-  @@unique([userId, wordId], name: "unique_user_word")
+  @@unique([user, word], name: "unique_user_word")
 }

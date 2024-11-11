@@ -1,46 +1,20 @@
 import express, { Request, Response, NextFunction } from "express";
 import passport from "passport";
 import session from "express-session";
-import jwt, { JwtPayload, VerifyErrors } from "jsonwebtoken";
+import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import prisma from "./prismaClient";
-import * as PlayHT from "playht";
+import path from "path";
 import fs from "fs";
 import "./passportSetup";
-
-interface DecodedToken {
-  userId: string;
-  iat: number;
-  exp: number;
-}
-
-interface User {
-  id: string;
-  googleId: string;
-  email: string;
-  name: string;
-  avatar: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
-interface WordResponse {
-  word: string;
-  phonetics: string;
-  meanings: {
-    partOfSpeech: string;
-  }[];
-}
-
-PlayHT.init({
-  userId: process.env.PLAY_HT_USERID ?? "",
-  apiKey: process.env.PLAY_HT_APIKEY ?? "",
-  defaultVoiceEngine: "Play3.0-mini",
-  defaultVoiceId:
-    "s3://voice-cloning-zero-shot/f6594c50-e59b-492c-bac2-047d57f8bdd8/susanadvertisingsaad/manifest.json",
-});
+import { getSound } from "./services/playHTService";
+import { capitalizeWord } from "./utils/capitalize";
+import { verifyToken } from "./utils/tokenVerification";
+import { verifyWord } from "./services/dictionaryService";
+import { isValidObjectId } from "./utils/mongoVerification";
+import { User } from "./utils/interfaces";
 
 dotenv.config();
 
@@ -70,6 +44,7 @@ app.use(express.urlencoded({ extended: true }));
 // 4. Inicializar Passport
 app.use(passport.initialize());
 app.use(passport.session());
+app.use("/public", express.static(path.join(__dirname, "public")));
 
 // Ruta para iniciar la autenticación con Google
 app.get("/auth/google", passport.authenticate("google", { scope: ["email", "profile"] }));
@@ -98,43 +73,6 @@ app.get("/auth/failure", (req: Request, res: Response) => {
   res.send("Error en la autenticación");
 });
 
-// Middleware para verificar el token JWT
-interface TokenPayload extends JwtPayload {
-  userId: string;
-}
-
-function verifyToken(req: Request, res: Response, next: NextFunction) {
-  const token = req.cookies["token"];
-  if (token) {
-    try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as TokenPayload;
-      if (decoded && decoded.userId) {
-        const userId = decoded.userId;
-        prisma.user
-          .findUnique({ where: { id: userId } })
-          .then((user) => {
-            if (user) {
-              req.user = user;
-              next();
-            } else {
-              res.sendStatus(403); // Usuario no encontrado
-            }
-          })
-          .catch((err) => {
-            console.error(err);
-            res.sendStatus(500); // Error del servidor
-          });
-      } else {
-        res.sendStatus(403); // Token inválido
-      }
-    } catch (err) {
-      console.error(err);
-      res.sendStatus(403); // Token inválido o error de verificación
-    }
-  } else {
-    res.sendStatus(403); // No se encontró el token
-  }
-}
 app.get("/auth/user", verifyToken, (req: Request, res: Response) => {
   const user = req.user;
   res.json({ user });
@@ -150,76 +88,19 @@ app.get("/logout", (req: Request, res: Response) => {
     if (err) {
       console.error(err);
       res.sendStatus(500);
+      return;
     } else {
       res.sendStatus(200);
+      return;
     }
   });
-  res.sendStatus(200);
+  return;
 });
 
-async function getSound(text: string): Promise<Buffer> {
-  const stream = await PlayHT.stream(`${text}`, {
-    voiceEngine: "Play3.0-mini",
-  });
-  const chunks: Buffer[] = [];
-
-  return new Promise<Buffer>((resolve, reject) => {
-    stream.on("data", (chunk: Buffer) => {
-      chunks.push(chunk);
-    });
-
-    stream.on("end", () => {
-      const buffer = Buffer.concat(chunks);
-      resolve(buffer);
-    });
-
-    stream.on("error", (err: Error) => {
-      reject(err);
-    });
-  });
-}
-
-async function verifyWord(word: String) {
-  const result = await fetch(`https://api.dictionaryapi.dev/api/v2/entries/en/${word}`);
-  const data = await result.json();
-  if (data[0] && data[0].word) {
-    return data[0];
-  } else {
-    return false;
-  }
-}
-
-function wordType(meaning: String) {
-  switch (meaning) {
-    case "noun":
-      return 1;
-    case "pronoun":
-      return 2;
-    case "verb":
-      return 3;
-    case "adjective":
-      return 4;
-    case "adverb":
-      return 5;
-    case "preposition":
-      return 6;
-    case "conjunction":
-      return 7;
-    case "interjection":
-      return 8;
-    case "expression":
-      return 9;
-    case "phrasal verb":
-      return 10;
-    default:
-      return 1;
-  }
-}
-
-function capitalizeWord(word: String) {
-  if (!word) return "";
-  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
-}
+app.get("/protected", verifyToken, (req: Request, res: Response) => {
+  res.json({ message: "Ruta protegida" });
+  res.status(200);
+});
 
 /////////// API REST ///////////
 
@@ -233,9 +114,14 @@ app.get("/api/word/:id/sound", verifyToken, async (req: Request, res: Response) 
   try {
     const { id } = req.params;
 
+    if (!isValidObjectId(id)) {
+      res.status(400).json({ error: "ID de palabra no válido" });
+      return;
+    }
+
     // Buscar la palabra en la base de datos
     const englishWord = await prisma.englishWords.findUnique({
-      where: { id: Number(id) },
+      where: { id: id },
     });
 
     if (!englishWord || !englishWord.sound) {
@@ -243,11 +129,27 @@ app.get("/api/word/:id/sound", verifyToken, async (req: Request, res: Response) 
       return;
     }
 
+    // Construir la ruta absoluta al archivo mp3
+    const soundFilePath = path.join(__dirname, "public", englishWord.sound);
+
+    // Verificar si el archivo existe
+    if (!fs.existsSync(soundFilePath)) {
+      res.status(404).json({ error: "Archivo de sonido no encontrado en el servidor" });
+      return;
+    }
+
     // Establecer el tipo de contenido adecuado
     res.setHeader("Content-Type", "audio/mpeg");
 
     // Enviar el archivo de audio
-    res.send(englishWord.sound);
+    res.sendFile(soundFilePath, (err) => {
+      if (err) {
+        console.error("Error al enviar el archivo de sonido:", err);
+        res.status(500).json({ error: "Error al enviar el archivo de sonido" });
+      }
+    });
+
+    console.log(`Archivo de sonido enviado: ${soundFilePath}`);
   } catch (error) {
     console.error("Error al obtener el sonido:", error);
     res.status(500).json({ error: "Error del servidor al obtener el sonido" });
@@ -270,7 +172,7 @@ app.post("/api/word", verifyToken, async (req: Request, res: Response) => {
     res.json({ message: `La palabra "${orig}" no existe en el diccionario.` });
     return;
   }
-  const type = wordType(validWord.meanings[0].partOfSpeech);
+  const type = capitalizeWord(validWord.meanings[0].partOfSpeech);
   const user = req.user as User;
   // Verificar en inglés existe en la base de datos
   let existingWord = await prisma.englishWords.findUnique({
@@ -280,13 +182,13 @@ app.post("/api/word", verifyToken, async (req: Request, res: Response) => {
   // Si no existe, obtener el sonido y guardarlo
   if (!existingWord) {
     // Obtener el sonido como un Buffer
-    const buffer = await getSound(original);
+    const mp3Name = await getSound(original);
 
     // Guardar la palabra y el sonido en la base de datos
     existingWord = await prisma.englishWords.create({
       data: {
         word: original,
-        sound: buffer,
+        sound: mp3Name,
       },
     });
   }
@@ -294,19 +196,14 @@ app.post("/api/word", verifyToken, async (req: Request, res: Response) => {
   // Verificar si la traducción ya existe
   if (existingWord) {
     existingTranslation = await prisma.words.findUnique({
-      where: {
-        unique_original_translation: {
-          original: existingWord.id,
-          translation: trans,
-        },
-      },
+      where: { original: existingWord.word },
     });
   }
   // Si no existe, crear la traducción
   if (!existingTranslation) {
     existingTranslation = await prisma.words.create({
       data: {
-        original: existingWord.id,
+        original: existingWord.word,
         translation: trans,
         type: type,
       },
@@ -314,12 +211,11 @@ app.post("/api/word", verifyToken, async (req: Request, res: Response) => {
   }
   // Verificar si la palabra ya existe en la lista de palabras del usuario
   if (existingTranslation) {
-    console.log(user.id);
     const existingUserWord = await prisma.userWords.findUnique({
       where: {
         unique_user_word: {
-          userId: user.id,
-          wordId: existingTranslation.id,
+          user: user.id,
+          word: existingTranslation.original,
         },
       },
     });
@@ -327,14 +223,14 @@ app.post("/api/word", verifyToken, async (req: Request, res: Response) => {
     if (existingUserWord) {
       // La palabra ya existe en la lista de palabras del usuario
       res.json({ message: "La palabra ya existe en tu lista de palabras" });
-      res.status(304);
+      res.status(200);
       return;
     } else {
       // Crear la relación entre el usuario y la palabra
       await prisma.userWords.create({
         data: {
-          userId: user.id,
-          wordId: existingTranslation.id,
+          user: user.id,
+          word: existingTranslation.original,
         },
       });
       res.json({ message: "Palabra creada", existingTranslation });
@@ -343,7 +239,7 @@ app.post("/api/word", verifyToken, async (req: Request, res: Response) => {
     }
   }
   res.json({ message: "Something went wrong" });
-  res.status(304);
+  res.status(500);
 });
 
 app.delete("/api/word/:id", verifyToken, async (req: Request, res: Response) => {
@@ -351,10 +247,8 @@ app.delete("/api/word/:id", verifyToken, async (req: Request, res: Response) => 
   const user = req.user as User;
   const userWord = await prisma.userWords.findUnique({
     where: {
-      unique_user_word: {
-        userId: user.id,
-        wordId: Number(id),
-      },
+      id: id,
+      user: user.id,
     },
   });
   if (userWord) {
@@ -375,14 +269,7 @@ app.get("/api/words", verifyToken, async (req: Request, res: Response) => {
   const user = req.user as User;
   const userWords = await prisma.userWords.findMany({
     where: {
-      userId: user.id,
-    },
-    include: {
-      Word: {
-        include: {
-          word: true,
-        },
-      },
+      user: user.id,
     },
   });
   res.json(userWords);
@@ -395,10 +282,8 @@ app.delete("/api/words/:id", verifyToken, async (req: Request, res: Response) =>
   //Comprobamos que el usuario tiene la palabra
   const userWords = await prisma.userWords.findUnique({
     where: {
-      unique_user_word: {
-        userId: user.id,
-        wordId: Number(id),
-      },
+      user: user.id,
+      id: id,
     },
   });
   if (userWords) {
